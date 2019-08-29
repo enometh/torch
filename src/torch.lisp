@@ -22,7 +22,118 @@
 
 (in-package :torch)
 
+#+nil
 (declaim (optimize speed))
+
+
+;;; ----------------------------------------------------------------------
+;;;
+;;; BEGIN MK-COMPAT (file-graph helpers)
+;;;
+
+;; component-children was module-components is our component-components
+(defun component-children (system)
+  (mk::%mk-traverse
+   system
+   (lambda (component)
+     (when (find (mk::component-type component) '(:file :private-file))
+       component))
+   t
+   :never))
+
+#+nil
+(mk::system-map-files (mk:find-system :cffi)
+		      nil :recursively-handle-deps :never)
+
+#+nil
+(setq $a (car (component-children (mk:find-system :cffi))))
+#+nil
+(mk::component-depends-on $a)
+#+nil
+(mk::component-depends-on (mk:find-system 'cffi))
+
+(defvar *parent-hash* (make-hash-table))
+
+(defun update-parent-hash ()
+  (maphash (lambda (system-name system)
+	     (declare (ignorable system-name))
+	     (labels ((rec (component)
+			(let ((ch (mk::component-components component)))
+			  (dolist (c ch)
+			    (setf (gethash c *parent-hash*) component))
+			  (map nil #'rec ch))))
+	       (rec system)))
+	   mk::*defined-systems*))
+
+#+nil
+(update-parent-hash)
+
+(defvar *system-hash* (make-hash-table :test #'eq
+				       #+ccl :weak #+ccl :key))
+;; keys are mk::components
+;; values are parent components, and system-names respectively
+(mapcar 'clrhash (list *parent-hash* *system-hash*))
+
+(defvar *system-name-hash* (make-hash-table :test #'eq
+					    #+ccl :weak #+ccl :key))
+
+(defun update-system-name-hash ()
+  (maphash (lambda (system-name system)
+	     (labels ((rec (component)
+			(assert (not (eql (mk::component-type component)
+					  :defsystem)))
+			(setf (gethash component *system-name-hash*)
+			      system-name)
+			(map nil #'rec (mk::component-components component))))
+	       (map nil #'rec (mk::component-components system))))
+	   mk::*defined-systems*))
+
+(defun component-parent-internal (component parent)
+  (let ((ch (mk::component-components parent)))
+    (or (and (find component ch) parent)
+	(some (lambda (p) (component-parent-internal component p)) ch))))
+
+(defun component-parent (component)
+  (let ((system-name (or (gethash component *system-name-hash*)
+			 (progn (update-system-name-hash)
+				(gethash component *system-name-hash*)))))
+    (component-parent-internal component (mk:find-system system-name))))
+
+#+nil
+(length (user::hash-keys *parent-hash*))
+#+nil
+(setq $a (nth 34 (user::hash-keys *parent-hash*)))
+
+#+nil
+(update-system-name-hash)
+
+#+nil
+(gethash (gethash $a *parent-hash*) *system-name-hash*)
+
+#+nil
+(gethash $a *parent-hash*)
+
+#+nil
+(eq (component-parent $a) (gethash $a *parent-hash*))
+
+;; component-children-by-name is a hash
+(defun component-children-by-name (c)
+  (let ((hash (make-hash-table :test 'equal)))
+    (loop for c1 in (mk::component-components c)
+	  for name = (mk::component-name c1)
+	  for prev = (gethash name hash)
+	  do (progn
+	       (when prev (error "duplicate name ~A" name))
+	       (setf (gethash name hash) c)))
+    hash))
+
+;;; END MK-COMPAT
+
+
+;;; ----------------------------------------------------------------------
+;;;
+;;;
+;;;
 
 ;;; helpers
 
@@ -72,7 +183,10 @@
     (string obj)
     (symbol (symbol-name obj))
     (package (package-name obj))
+    #+(and asdf (not mk-defsystem))
     (asdf:component (asdf:component-name obj))
+    #+mk-defsystem
+    (mk::component(mk::component-name obj))
     (function (symbol-name (millet:function-name obj)))))
 
 (deftype direction () '(member nil :lr :rl :tb :bt))
@@ -84,13 +198,17 @@
   (defun doc (system path)
     (uiop:read-file-string
       (uiop:subpathname
-        (asdf:system-source-directory (asdf:find-system system)) path))))
+       #+(and asdf (not mk-defsystem))
+        (asdf:system-source-directory (asdf:find-system system))
+	#+mk-defsystem
+	(mk::component-root-dir (mk:find-system system) :source)
+	path))))
 
 ;;;; SYSTEM-GRAPH.
 
 (declaim
  (ftype (function
-         ((or symbol asdf:system) &key (:type file-format)
+         ((or symbol #+asdf asdf:system #-asdf t) &key (:type file-format)
           (:direction direction))
          (values pathname &optional))
         system-graph))
@@ -100,17 +218,28 @@
   (let ((namestring (filename (ensure-name system) type)))
     (cl-dot:dot-graph
       (apply #'cl-dot:generate-graph-from-roots 'system
-             (list (asdf:find-system system))
+             (list #+(and asdf (not mk-defsystem))
+		   (asdf:find-system system)
+		   #+mk-defsystem
+		   (mk:find-system system))
              (when direction
                `((:rankdir ,(string direction)))))
       namestring
       :format type)
     (pathname namestring)))
 
+#+(and asdf (not mk-defystem))
 (defmethod cl-dot:graph-object-node ((graph (eql 'system)) (s asdf:system))
   (make-instance 'cl-dot:node
                  :attributes (list :label (asdf:component-name s))))
 
+#+mk-defsystem
+(defmethod cl-dot:graph-object-node((graph(eql 'system)) system) ;FIXME
+  (make-instance 'cl-dot:node
+ 		 :attributes
+		 (list :label (mk::component-name system))))
+
+#+(and asdf (not mk-defsystem))
 (defmethod cl-dot:graph-object-points-to
            ((graph (eql 'system)) (s asdf:system))
   (loop :for system
@@ -118,6 +247,13 @@
                          (asdf:system-depends-on s))
         :unless (listp system)
           :collect (asdf:find-system system)))
+
+#+mk-defsystem
+(defmethod cl-dot:graph-object-points-to((graph(eql 'system)) system) ;FIXME
+  (loop :for system :in (mk::component-depends-on system)
+ 	:unless (listp system)
+	:collect (mk:find-system system)))
+
 
 ;;;; PACKAGE-GRAPH.
 
@@ -148,11 +284,15 @@
 
 ;;;; FILE-GRAPH.
 
-(defun files (system) (asdf:component-children (asdf:find-system system)))
+(defun files (system)
+  #+(and asdf (not mk-defsystem))
+  (asdf:component-children (asdf:find-system system))
+  #+mk-defsystem
+  (component-children (mk:find-system system)))
 
 (declaim
  (ftype (function
-         ((or symbol string asdf:system) &key (:type file-format)
+         ((or symbol string #+asdf asdf:system #-asdf t) &key (:type file-format)
           (:direction direction))
          (values pathname &optional))
         file-graph))
@@ -168,17 +308,31 @@
       :format type)
     (pathname namestring)))
 
+#+(and asdf (not mk-defsystem))
 (defmethod cl-dot:graph-object-node
            ((graph (eql 'file)) (node asdf:cl-source-file))
   (make-instance 'cl-dot:node
                  :attributes (list :label (asdf:component-name node))))
 
+#+mk-defsystem ;; node asdf:cl-source-file
+(defmethod cl-dot:graph-object-node ((graph(eql 'file)) node)
+   (make-instance 'cl-dot:node
+ 		 :attributes
+		 (list :label (mk::component-name node))))
+
+#+(and asdf (not mk-defsystem))
 (defmethod cl-dot:graph-object-points-to
            ((graph (eql 'file)) (node asdf:cl-source-file))
   (loop :for dep :in (asdf:component-sideway-dependencies node)
         :collect (gethash dep
                           (asdf:component-children-by-name
                             (asdf:component-parent node)))))
+
+#+mk-defsystem ;; node asdf:cl-source-file
+(defmethod cl-dot:graph-object-points-to ((graph(eql 'file)) node)
+  (loop :for dep :in  ;; (asdf:component-sideway-dependencies node)
+	(mk::component-depends-on node)
+	:collect (gethash dep (component-children-by-name (component-parent node)))))
 
 ;;;; OBJECT-GRAPH.
 
@@ -297,20 +451,32 @@
   (funcall *builtin-hook* expander form environment))
 
 (defun graph (system)
-  (loop :for system :in (asdf:system-depends-on (asdf:find-system system))
-        :with loaded-systems :of-type list = (asdf:already-loaded-systems)
+  (loop :for system :in #+(and asdf (not mk-defsystem)) (asdf:system-depends-on (asdf:find-system system))
+	#+mk-defsystem(system-depends-on (mk:find-system system))
+        :with loaded-systems :of-type list = #+(and asdf (not mk-defsystem)) (asdf:already-loaded-systems)
+	#+mk-defsystem (loop for v being each hash-value of
+			     mk::*defined-systems* collect v)
         :unless (and (not (listp system)) ; ignoring (:version ...)
-                     (find system loaded-systems :test #'string-equal))
+                     (find system loaded-systems :test #'equal ;; FIXME
+			   ;; #'string-equal
+			   ))
           :collect system :into result
         :finally (when result
-                   (ql:quickload result :silent t)))
+		   #+(and asdf (not mk-defsystem))
+                   (ql:quickload result :silent t)
+		   #+mk-defsystem
+		   (mk:load-system system)))
   (let ((*compile-verbose* nil)
         (*compile-print* nil)
         (*load-verbose* nil)
         (*load-print* nil))
     (handler-bind ((warning #'muffle-warning))
       (let ((*macroexpand-hook* #'macroexpand-hook) *forms* *packages*)
+	#+(and asdf (not mk-defsystem))
         (asdf:load-system system :force t)
+	#+mk-defsystem
+	(mk:load-system system :force t)
+	;;(user::mk-oos system) ;-- use undefsystem FIXME
         *forms*))))
 
 ;;;; CODE-GRAPH.
@@ -322,11 +488,16 @@
 
 (defun symbol-names-file-p (symbol)
   (let ((system
+	 #+(and asdf (not mk-defsystem))
          (asdf:find-system
-           (string-downcase (package-name (symbol-package symbol))) nil)))
+           (string-downcase (package-name (symbol-package symbol))) nil)
+	 #+mk-defsystem
+         (mk:find-system
+           (string-downcase (package-name (symbol-package symbol)))
+	   :load-or-nil)))
     (when system
       (values (gethash (string-downcase (symbol-name symbol))
-                       (asdf:component-children-by-name system))))))
+                       (component-children-by-name system))))))
 
 (defmethod cl-dot:graph-object-node ((graph (eql 'code)) (object code))
   (flet ((label (object)
@@ -452,7 +623,7 @@
 
 (declaim
  (ftype (function
-         ((or symbol string asdf:system) &key (:ignore-privates boolean)
+         ((or symbol string #+asdf asdf:system #-asdf t) &key (:ignore-privates boolean)
           (:ignore-standalone boolean) (:split boolean) (:direction direction)
           (:package (or symbol string package)))
          (values null &optional))
