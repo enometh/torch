@@ -431,6 +431,12 @@
           (delete-duplicates (flatten form) :from-end t))
         (throw :do-nothing nil))))
 
+
+#+nil
+(typep '(DEFMETHOD (SETF CFFI::FOREIGN-STRUCT-SLOT-VALUE)
+	   (CFFI::VALUE CFFI::PTR (CFFI::SLOT CFFI::SIMPLE-STRUCT-SLOT)))
+       '(cons (eql defmethod) *))
+
 (defun macroexpand-hook (expander form environment)
   (catch :do-nothing
     (cond
@@ -441,8 +447,12 @@
       ((typep form '(cons (eql defmacro) *))
        (pushnew (form form) *forms* :test #'equal))
       ((typep form '(cons (eql defmethod) *))
-       (when (eq *package* (symbol-package (cadr form)))
-         (pushnew (form form) *forms* :test #'equal)))
+       (etypecase (cadr form)
+	 (symbol (when(eq  *package* (symbol-package(cadr form)))
+		   (pushnew(form form) *forms* :test #'equal)))
+	 (cons (assert (eql (car (cadr form)) 'setf))
+	       (when(eq  *package* (symbol-package (cadr (cadr form))))
+		 (pushnew(form form) *forms* :test #'equal)))))
       ((typep form '(cons (eql defpackage) *)) (push (second form) *packages*))
       ((typep form '(cons (eql defgeneric) *))
        (loop :for option :in (cdddr form)
